@@ -1,10 +1,16 @@
 #!/bin/sh
 set -e
-if id -u pi >/dev/null 2>&1; then
+getent passwd | while IFS=: read -r name _ uid _ _ home _; do
+  [ "$uid" -ge 1000 ] 2>/dev/null || continue
+  [ "$uid" -lt 65534 ] || continue
+  case "$home" in
+    /home/*) ;;
+    *) continue ;;
+  esac
   for grp in spi gpio i2c video input; do
     if getent group "$grp" >/dev/null; then
-      usermod -aG "$grp" pi || true
+      usermod -aG "$grp" "$name" || true
     fi
   done
-fi
+done
 exit 0
