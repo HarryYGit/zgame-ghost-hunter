@@ -20,7 +20,7 @@ The CC1101 antenna is not directional. The bearing is whatever you swept, and re
 | S | Level speed: slow, normal, fast |
 | Z | Zero the heading, clear the map, and recalibrate the gyro. Hold still for 1 second |
 | F | Flip the rotation direction |
-| `,` `.` or arrows | Turn by hand when the IMU is missing |
+| A / D or arrows | Turn left / right by hand when the IMU is missing |
 | Q or Esc | Quit |
 
 If the Cap cannot be opened, the error stays on screen. **S** continues in simulation. **Q** quits.
