@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+if id -u pi >/dev/null 2>&1; then
+  for grp in spi gpio i2c video input; do
+    if getent group "$grp" >/dev/null; then
+      usermod -aG "$grp" pi || true
+    fi
+  done
+fi
+exit 0

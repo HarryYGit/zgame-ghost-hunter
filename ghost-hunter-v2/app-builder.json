@@ -1,0 +1,28 @@
+{
+  "package_name": "ghost-hunter",
+  "version": "2.1.0",
+  "app_name": "Ghost Hunter",
+  "bin_name": "ghost-hunter",
+  "description": "Sub-GHz ghost radar using the Cap CC1101 and the onboard IMU.",
+  "store": {
+    "summary": "Sweep a Cap CC1101 and follow the IMU to hunt radio ghosts.",
+    "description": "Ghost Hunter turns the M5Stack Cap CC1101 and the CardputerZero IMU into a two-screen ghost radar. SCAN shows a live band spectrum and a smoothed threat level. GHOST MAP records signal strength as you turn and marks the strongest heading. The antenna is not directional: the bearing is a sweep, and remotes, sensors, and appliance noise show up too. Needs the Cap CC1101. Without it, press S to play in simulation.",
+    "categories": ["Games", "Radio & Comms"],
+    "screenshots": ["screenshots/scan.png", "screenshots/map.png"],
+    "icon": "packaging/icon.png",
+    "license": "MIT",
+    "author": {
+      "display_name": "harry yan"
+    },
+    "share_code": "GHNT",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": true,
+      "network": false,
+      "additional_hardware": true,
+      "background_service": false,
+      "external_display": false
+    }
+  }
+}
