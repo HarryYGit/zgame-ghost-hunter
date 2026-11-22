@@ -19,7 +19,7 @@ cd "$APP"
 echo "Installing runtime packages..."
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update
-sudo apt-get install -y python3 python3-pygame python3-spidev alsa-utils fonts-dejavu-core
+sudo apt-get install -y python3 python3-pygame python3-numpy python3-spidev alsa-utils fonts-dejavu-core
 
 PREFIX=/usr/share/APPLaunch
 export STAGE INSTALL_PREFIX="$PREFIX" APP_INSTALL_DIR="$PREFIX/apps/$PKG_NAME" PKG_NAME

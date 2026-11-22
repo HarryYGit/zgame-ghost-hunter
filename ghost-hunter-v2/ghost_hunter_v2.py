@@ -423,7 +423,97 @@ def wrap_text(font, text, width):
     return lines
 
 
-def offer_sim(screen, font, font_xs, message):
+class FbMirror:
+    """Copy the pygame window onto the panel framebuffer APPLaunch hands over."""
+
+    def __init__(self, path):
+        base = "/sys/class/graphics/" + os.path.basename(path)
+        self.w, self.h = self._size(base)
+        self.bpp = int(self._rd(f"{base}/bits_per_pixel"))
+        self.stride = int(self._rd(f"{base}/line_length"))
+        if self.bpp not in (16, 32):
+            raise HardwareError(f"{path} is {self.bpp}-bit; need 16 or 32")
+        try:
+            self.fd = os.open(path, os.O_RDWR)
+        except OSError:
+            self.fd = os.open(path, os.O_WRONLY)
+        self._np = None
+        try:
+            import numpy
+            self._np = numpy
+        except ImportError:
+            pass
+
+    @staticmethod
+    def _rd(path):
+        with open(path) as f:
+            return f.read().strip()
+
+    def _size(self, base):
+        try:
+            for mode in self._rd(f"{base}/modes").split():
+                spec = mode.split(":", 1)[-1]
+                spec = spec.split("p", 1)[0].split("i", 1)[0]
+                if "x" in spec:
+                    w, h = spec.split("x", 1)
+                    return int(w), int(h)
+        except OSError:
+            pass
+        w, h = self._rd(f"{base}/virtual_size").split(",")
+        return int(w), int(h)
+
+    def present(self, screen):
+        import pygame
+        rgb = pygame.image.tobytes(screen, "RGB")
+        if self._np is not None:
+            frame = self._pack_numpy(rgb)
+        else:
+            frame = self._pack_python(rgb)
+        row = self.w * (2 if self.bpp == 16 else 4)
+        if self.stride == row:
+            os.lseek(self.fd, 0, os.SEEK_SET)
+            os.write(self.fd, frame)
+            return
+        pos = 0
+        for y in range(self.h):
+            start = y * row
+            os.lseek(self.fd, pos, os.SEEK_SET)
+            os.write(self.fd, frame[start:start + row])
+            pos += self.stride
+
+    def _pack_numpy(self, rgb):
+        px = self._np.frombuffer(rgb, dtype=self._np.uint8).reshape(-1, 3)
+        r = px[:, 0].astype(self._np.uint16)
+        g = px[:, 1].astype(self._np.uint16)
+        b = px[:, 2].astype(self._np.uint16)
+        if self.bpp == 32:
+            out = self._np.empty((px.shape[0], 4), dtype=self._np.uint8)
+            out[:, 0], out[:, 1], out[:, 2], out[:, 3] = px[:, 2], px[:, 1], px[:, 0], 255
+            return out.tobytes()
+        pix = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+        return pix.astype("<u2").tobytes()
+
+    def _pack_python(self, rgb):
+        mv = memoryview(rgb)
+        n = self.w * self.h
+        if self.bpp == 32:
+            out = bytearray(n * 4)
+            o = 0
+            for i in range(0, n * 3, 3):
+                out[o:o + 4] = bytes((mv[i + 2], mv[i + 1], mv[i], 255))
+                o += 4
+            return out
+        out = bytearray(n * 2)
+        o = 0
+        for i in range(0, n * 3, 3):
+            v = ((mv[i] & 0xF8) << 8) | ((mv[i + 1] & 0xFC) << 3) | (mv[i + 2] >> 3)
+            out[o] = v & 0xFF
+            out[o + 1] = v >> 8
+            o += 2
+        return out
+
+
+def offer_sim(screen, font, font_xs, message, present):
     """Hardware is missing. S starts the simulator, Q quits. None means quit."""
     import pygame
     W, H = screen.get_size()
@@ -450,7 +540,7 @@ def offer_sim(screen, font, font_xs, message):
             screen.blit(font.render(line, True, (255, 180, 80)), (8, y))
             y += line_h
         screen.blit(font_xs.render(hint, True, (180, 180, 200)), (8, H - font_xs.get_height() - 6))
-        pygame.display.flip()
+        present()
         clock.tick(30)
 
 
@@ -474,17 +564,36 @@ def main():
     bus, dev = (int(x) for x in args.spi_dev.split("."))
 
     import pygame
+    fb_path = os.environ.get("GHOST_HUNTER_FB")
+    if fb_path:
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
     pygame.init()
+    fb_out = None
     if args.size:
         screen = pygame.display.set_mode(tuple(int(v) for v in args.size.lower().split("x")))
+    elif fb_path:
+        try:
+            fb_out = FbMirror(fb_path)
+        except OSError as e:
+            raise SystemExit(f"Cannot open {fb_path}: {e}\nLog out and back in so the video group applies.") from e
+        screen = pygame.display.set_mode((fb_out.w, fb_out.h))
     else:
         screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     pygame.mouse.set_visible(False)
+
+    def present():
+        pygame.display.flip()
+        if fb_out is not None:
+            fb_out.present(screen)
     W, H = screen.get_size()
     fam = ["dejavusans", "liberationsans", "freesans"]
     font_xs = pygame.font.SysFont(fam, max(10, H // 14))
     font_s = pygame.font.SysFont(fam, max(12, H // 11))
     font_l = pygame.font.SysFont(fam, max(16, H // 7), bold=True)
+    screen.fill((8, 8, 14))
+    screen.blit(font_l.render("GHOST HUNTER", True, (80, 220, 140)), (8, H // 3))
+    present()
 
     if args.sim:
         radio = SimRadio()
@@ -492,7 +601,7 @@ def main():
         try:
             radio = CC1101(bus, dev)
         except HardwareError as e:
-            radio = offer_sim(screen, font_s, font_xs, str(e))
+            radio = offer_sim(screen, font_s, font_xs, str(e), present)
             if radio is None:
                 pygame.quit()
                 return
@@ -625,7 +734,7 @@ def main():
             text(font_xs, f"IMU:{imu_name}{' FLIP' if hd.flip else ''}{' ERR' if hd.error else ''}",
                  (110, 110, 130), (px, py + 5 * step))
             text(font_xs, "TAB:scan Z:zero F:flip ,/.:turn", (110, 110, 130), (6, H - foot))
-        pygame.display.flip()
+        present()
 
         if args.shot:                                    # testing helper: screenshots, then exit
             el = time.time() - t_start
