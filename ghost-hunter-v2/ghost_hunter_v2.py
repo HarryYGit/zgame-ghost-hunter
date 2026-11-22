@@ -23,7 +23,7 @@ Keys:     TAB screen   1-4 band   SPACE baseline   M mute   S level speed
           F flip rotation direction   , and . (or arrows) turn manually if no IMU
           Q/ESC quit
 """
-import argparse, glob, math, os, random, struct, subprocess, tempfile, time, wave
+import argparse, errno, glob, math, os, random, struct, subprocess, tempfile, time, wave
 
 
 class HardwareError(Exception):
@@ -430,7 +430,13 @@ class FbMirror:
         base = "/sys/class/graphics/" + os.path.basename(path)
         self.w, self.h = self._size(base)
         self.bpp = int(self._rd(f"{base}/bits_per_pixel"))
-        self.stride = int(self._rd(f"{base}/line_length"))
+        self.stride = self.w * (2 if self.bpp == 16 else 4)
+        for name in ("line_length", "stride"):
+            try:
+                self.stride = int(self._rd(f"{base}/{name}"))
+                break
+            except OSError:
+                pass
         if self.bpp not in (16, 32):
             raise HardwareError(f"{path} is {self.bpp}-bit; need 16 or 32")
         try:
@@ -576,7 +582,8 @@ def main():
         try:
             fb_out = FbMirror(fb_path)
         except OSError as e:
-            raise SystemExit(f"Cannot open {fb_path}: {e}\nLog out and back in so the video group applies.") from e
+            hint = "Log out and back in so the video group applies." if e.errno == errno.EACCES else ""
+            raise SystemExit(f"Cannot open {fb_path}: {e}" + (f"\n{hint}" if hint else "")) from e
         screen = pygame.display.set_mode((fb_out.w, fb_out.h))
     else:
         screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
