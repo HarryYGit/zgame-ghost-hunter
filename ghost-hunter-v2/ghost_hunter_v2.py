@@ -80,9 +80,37 @@ def pinctrl_dump(pins="7,9,10,11,15,17,22,23,26"):
 
 
 def cap_power_on():
-    gpio_out(PIN_NFC_CS, 1)       # deselect the NFC chip (shares MISO)
-    gpio_out(PIN_POWER_EN, 1)     # enable the Cap DC-DC
+    """Power the Cap the way ZeroSub does, before any SPI transfer.
+
+    G14/G15 go to the SPI/GDO function, GPIO26 enables the Cap, and the
+    ext_5v_out LED rail supplies it. Without that rail the CC1101 stays silent
+    until some other app has turned it on.
+    """
+    notes = []
+    for cmd in (
+        ["pinctrl", "set", "14", "a5"],
+        ["pinctrl", "set", "15", "a5"],
+        ["pinctrl", "set", "22", "op", "dh"],
+        ["pinctrl", "set", "26", "op", "dh"],
+    ):
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except (FileNotFoundError, subprocess.CalledProcessError) as e:
+            detail = getattr(e, "stderr", None) or str(e)
+            notes.append(" ".join(cmd) + ": " + str(detail).strip())
+    led = "/sys/class/leds/ext_5v_out/brightness"
+    try:
+        with open(led) as handle:
+            level = handle.read().strip()
+        if level in ("", "0"):
+            with open(led, "w") as handle:
+                handle.write("1")
+    except OSError as e:
+        notes.append(f"EXT5V {led}: {e}")
     time.sleep(0.2)
+    for note in notes:
+        print("Cap power:", note)
+    return notes
 
 
 # ---------------- CC1101 driver ----------------
@@ -103,17 +131,12 @@ class CC1101:
                 f"{glob.glob('/dev/spidev*') or 'none'}. "
                 "Enable SPI / the CS1 spidev node, or use --spi-dev."
             )
-        if USE_CAP:
-            cap_power_on()
+        power_notes = cap_power_on() if USE_CAP else []
         self.spi = spidev.SpiDev()
         self.spi.open(bus, dev)
         self.spi.mode = 0
         part, ver = 0, 0
-        for hz, extra in ((SPI_HZ, None), (500_000, None), (500_000, 17)):
-            if extra is not None and USE_CAP:
-                print(f"  Retry: also driving G{extra} high")
-                gpio_out(extra, 1)
-                time.sleep(0.3)
+        for hz in (SPI_HZ, 500_000):
             self.spi.max_speed_hz = hz
             self.reset()
             part, ver = self.read_status(0x30), self.read_status(0x31)
@@ -123,7 +146,8 @@ class CC1101:
             raise HardwareError(
                 f"CC1101 not responding (PARTNUM=0x{part:02X}, VERSION=0x{ver:02X}). "
                 f"Pin states: {pinctrl_dump()}. "
-                "Check: Cap fully seated, inserted with power off, G26 reads high."
+                + (" ".join(power_notes) + " " if power_notes else "")
+                + "Check: Cap fully seated, inserted with power off, G26 and EXT5V on."
             )
         self.spi.max_speed_hz = SPI_HZ
         print(f"CC1101 detected: PARTNUM=0x{part:02X} VERSION=0x{ver:02X}")
@@ -133,7 +157,10 @@ class CC1101:
         if not USE_CAP:
             return
         sw0, sw1 = BAND_SW[key]
-        gpio_out(PIN_RF_SW0, sw0)
+        try:
+            gpio_out(PIN_RF_SW0, sw0)
+        except HardwareError as e:
+            print(e)
         self.write(0x00, 0x6F if sw1 else 0x2F)   # IOCFG2 drives RF_SW1: 0x2F low, 0x6F high
 
     def strobe(self, cmd):
@@ -377,14 +404,16 @@ class GhostMap:
 class Beeper:
     def __init__(self):
         self.muted, self.last, self.files = False, 0, {}
+        self.device = "plughw:0,0"
 
     def _tone(self, freq):
         if freq not in self.files:
             path = os.path.join(tempfile.gettempdir(), f"gh_{freq}.wav")
+            rate = 48000
             with wave.open(path, "w") as w:
-                w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
-                n = 1600
-                w.writeframes(b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * freq * i / 16000)
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+                n = rate // 10
+                w.writeframes(b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * freq * i / rate)
                                                               * (1 - i / n))) for i in range(n)))
             self.files[freq] = path
         return self.files[freq]
@@ -394,12 +423,102 @@ class Beeper:
         if self.muted or level == 0 or now - self.last < max(0.12, 0.9 - level * 0.16):
             return
         self.last = now
+        cmd = ["aplay", "-q", "-D", self.device, self._tone(400 + level * 200)]
         try:
-            subprocess.Popen(["aplay", "-q", self._tone(400 + level * 200)],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except FileNotFoundError:                        # no aplay installed -> stay silent
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
             self.muted = True
             print("aplay not found (sudo apt install alsa-utils); sound disabled.")
+
+
+# Linux evdev codes for the TCA8418 keypad. SDL's dummy video driver,
+# which we use so the picture lands on /dev/fb0, never delivers these.
+_EVDEV_KEYS = {
+    1: ("ESCAPE", ""),
+    2: ("1", "1"), 3: ("2", "2"), 4: ("3", "3"), 5: ("4", "4"),
+    6: ("5", "5"), 7: ("6", "6"), 8: ("7", "7"), 9: ("8", "8"),
+    10: ("9", "9"), 11: ("0", "0"),
+    15: ("TAB", ""),
+    16: ("q", "q"), 17: ("w", "w"), 18: ("e", "e"), 19: ("r", "r"),
+    20: ("t", "t"), 21: ("y", "y"), 22: ("u", "u"), 23: ("i", "i"),
+    24: ("o", "o"), 25: ("p", "p"),
+    30: ("a", "a"), 31: ("s", "s"), 32: ("d", "d"), 33: ("f", "f"),
+    44: ("z", "z"), 45: ("x", "x"), 46: ("c", "c"),
+    50: ("m", "m"), 51: ("COMMA", ","), 52: ("PERIOD", "."),
+    57: ("SPACE", " "),
+    103: ("UP", ""), 105: ("LEFT", ""), 106: ("RIGHT", ""), 108: ("DOWN", ""),
+}
+
+
+class EvdevKeyboard:
+    """Read the Cardputer keypad and post pygame key events."""
+
+    def __init__(self):
+        self.fds = []
+        self._open()
+
+    def _open(self):
+        preferred = "/dev/input/by-path/platform-3f804000.i2c-event"
+        paths = [preferred] if os.path.exists(preferred) else sorted(glob.glob("/dev/input/event*"))
+        for path in paths:
+            name = self._name(path)
+            if preferred not in path and not any(word in name for word in ("key", "kbd", "tca8418")):
+                continue
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            except OSError as e:
+                print(f"keyboard {path}: {e}")
+                continue
+            self.fds.append(fd)
+            print(f"keyboard: {path} ({name or 'unknown'})")
+            if path == preferred:
+                break
+        if not self.fds:
+            print("keyboard: no evdev keypad opened")
+
+    @staticmethod
+    def _name(path):
+        node = os.path.basename(os.path.realpath(path))
+        try:
+            with open(f"/sys/class/input/{node}/device/name") as handle:
+                return handle.read().strip().lower()
+        except OSError:
+            return ""
+
+    def pump(self):
+        import pygame
+        size = struct.calcsize("llHHi")
+        for fd in self.fds:
+            while True:
+                try:
+                    data = os.read(fd, size * 32)
+                except BlockingIOError:
+                    break
+                except OSError:
+                    break
+                if not data:
+                    break
+                for offset in range(0, len(data) - size + 1, size):
+                    _sec, _usec, kind, code, value = struct.unpack_from("llHHi", data, offset)
+                    if kind != 1 or value not in (0, 1, 2):
+                        continue
+                    mapped = _EVDEV_KEYS.get(code)
+                    if mapped is None:
+                        continue
+                    name, uni = mapped
+                    key = getattr(pygame, "K_" + name)
+                    event_type = pygame.KEYUP if value == 0 else pygame.KEYDOWN
+                    pygame.event.post(pygame.event.Event(event_type, key=key, unicode=uni, mod=0))
+
+
+_keyboard = None
+
+
+def pump_keys():
+    global _keyboard
+    if _keyboard is None:
+        _keyboard = EvdevKeyboard()
+    _keyboard.pump()
 
 
 # ---------------- Main ----------------
@@ -527,6 +646,7 @@ def offer_sim(screen, font, font_xs, message, present):
     lines = wrap_text(font, "NO RADIO", W - 16) + [""] + wrap_text(font, message, W - 16)
     hint = "S: simulate    Q: quit"
     while True:
+        pump_keys()
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
                 return None
@@ -632,6 +752,7 @@ def main():
 
     running = True
     while running:
+        pump_keys()
         for e in pygame.event.get():
             if e.type != pygame.KEYDOWN:
                 continue
