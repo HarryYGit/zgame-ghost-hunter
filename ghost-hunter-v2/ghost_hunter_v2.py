@@ -7,7 +7,7 @@ Launched from APPLaunch as user pi. No root, and no pip packages.
   * SCAN shows the spectrum and a smoothed threat level (fast attack / slow
     release, minimum time on each of the 6 levels). Tune the constants below.
   * TAB switches to GHOST MAP. Heading comes from the kernel IIO driver
-    (BMI270 gyro + accel). If IIO is missing, turn with A and D or the arrows.
+    (BMI270 gyro + accel). If IIO is missing, turn with the arrow keys.
   * If the Cap CC1101 cannot be opened, the error is drawn on screen.
     S continues in simulation, Q quits.
 
@@ -20,7 +20,7 @@ Run:      python3 ghost_hunter_v2.py            # real hardware
           python3 ghost_hunter_v2.py --sim --size 320x170 --shot screenshots
 Keys:     TAB screen   1-4 band   SPACE baseline   M mute   S level speed
           Z zero heading / clear map / re-calibrate gyro (hold still 1 s)
-          F flip rotation direction   A and D (or arrows) turn manually if no IMU
+          F flip rotation direction   arrows turn manually if no IMU
           Q/ESC quit
 """
 import argparse, errno, glob, math, os, random, struct, subprocess, tempfile, time, wave
@@ -276,7 +276,7 @@ def make_imu(mode, sim):
             return IIOImu()
         except Exception as e:
             print(f"IMU via IIO not available ({e}).")
-    print("Falling back to manual heading: use A and D (or arrow keys) to turn.")
+    print("Falling back to manual heading: use the arrow keys to turn.")
     return None
 
 
@@ -776,7 +776,7 @@ def main():
                 hd.flip = not hd.flip
 
         keys = pygame.key.get_pressed()
-        manual = (keys[pygame.K_d] or keys[pygame.K_RIGHT]) - (keys[pygame.K_a] or keys[pygame.K_LEFT])
+        manual = keys[pygame.K_RIGHT] - keys[pygame.K_LEFT]
 
         for _ in range(CH_PER_FRAME):                    # fast: raw channel scan
             az.update(idx, radio.rssi_at(freq_of(idx)))
@@ -861,7 +861,7 @@ def main():
                 text(font_s, "SWEEP AROUND", (130, 130, 150), (px, py + 3 * step))
             text(font_xs, f"IMU:{imu_name}{' FLIP' if hd.flip else ''}{' ERR' if hd.error else ''}",
                  (110, 110, 130), (px, py + 5 * step))
-            text(font_xs, "TAB:scan Z:zero F:flip A:left D:right", (110, 110, 130), (6, H - foot))
+            text(font_xs, "TAB:scan Z:zero F:flip", (110, 110, 130), (6, H - foot))
         present()
 
         if args.shot:                                    # testing helper: screenshots, then exit
