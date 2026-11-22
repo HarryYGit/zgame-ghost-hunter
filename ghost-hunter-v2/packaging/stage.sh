@@ -16,6 +16,24 @@ if [ -e "$FB" ]; then
   export SDL_VIDEODRIVER=dummy
   export SDL_AUDIODRIVER=dummy
 fi
+# APPLaunch does not hand over the desktop PipeWire socket.
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+  uid=$(id -u)
+  if [ -S "/run/user/$uid/pipewire-0" ] || [ -S "/run/user/$uid/pulse/native" ]; then
+    XDG_RUNTIME_DIR="/run/user/$uid"
+  else
+    for d in /run/user/*; do
+      if [ -S "$d/pipewire-0" ]; then
+        XDG_RUNTIME_DIR="$d"
+        break
+      fi
+    done
+  fi
+fi
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  export XDG_RUNTIME_DIR
+  export PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR"
+fi
 echo "[ghost-hunter] fb=${GHOST_HUNTER_FB:-none} sdl=${SDL_VIDEODRIVER:-default} uid=$(id -u)" >>"$LOG" 2>&1
 exec python3 /usr/share/APPLaunch/apps/ghost-hunter/ghost_hunter_v2.py "$@" >>"$LOG" 2>&1
 EOF

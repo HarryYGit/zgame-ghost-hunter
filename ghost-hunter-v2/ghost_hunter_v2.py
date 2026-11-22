@@ -23,7 +23,7 @@ Keys:     TAB screen   1-4 band   SPACE baseline   M mute   S level speed
           F flip rotation direction   arrows turn manually if no IMU
           Q/ESC quit
 """
-import argparse, errno, glob, math, os, random, struct, subprocess, tempfile, time, wave
+import argparse, errno, glob, math, os, random, shlex, struct, subprocess, tempfile, time, wave
 
 
 class HardwareError(Exception):
@@ -401,29 +401,138 @@ class GhostMap:
 
 
 # ---------------- Sound ----------------
+def _audio_call(cmd):
+    """Run an audio command. A session started before the audio group existed
+    is denied on /dev/snd; retry inside that group when it is the reason."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    err = (result.stderr or "") + (result.stdout or "")
+    if result.returncode == 0 or "ermission" not in err:
+        return result, False
+    try:
+        retry = subprocess.run(
+            ["sg", "audio", "-c", " ".join(shlex.quote(part) for part in cmd)],
+            capture_output=True, text=True)
+    except FileNotFoundError:
+        return result, False
+    return retry, retry.returncode == 0
+
+
+def _audio_runtime():
+    """APPLaunch does not pass the desktop's PipeWire socket. Point at it."""
+    if os.environ.get("XDG_RUNTIME_DIR"):
+        return
+    uid = str(os.getuid())
+    dirs = [f"/run/user/{uid}"] + sorted(glob.glob("/run/user/*"))
+    for d in dirs:
+        if os.path.exists(os.path.join(d, "pipewire-0")) or os.path.exists(os.path.join(d, "pulse", "native")):
+            os.environ["XDG_RUNTIME_DIR"] = d
+            os.environ.setdefault("PIPEWIRE_RUNTIME_DIR", d)
+            print(f"audio: runtime {d}")
+            return
+
+
+def _sound_cards():
+    es, rest = [], []
+    try:
+        lines = open("/proc/asound/cards")
+    except OSError:
+        return [0], []
+    with lines as handle:
+        for line in handle:
+            head = line.strip().split(" ", 1)[0]
+            if not head.isdigit():
+                continue
+            n = int(head)
+            (es if "8389" in line.lower() else rest).append(n)
+    return (es or rest or [0]), es
+
+
+def _speaker_on(card):
+    # 179 is -6 dB. 0 dB on this codec makes the speaker amp drop out.
+    for name in ("DACL Playback Volume", "DACR Playback Volume"):
+        got = _audio_call(["amixer", "-c", str(card), "cset", f"name={name}", "179"])
+        if got and got[0].returncode != 0:
+            err = (got[0].stderr or got[0].stdout or "").strip()
+            if err and "ermission" in err:
+                print(f"audio card {card}: {err.splitlines()[-1]}")
+    listed = _audio_call(["amixer", "-c", str(card), "scontrols"])
+    if not listed or listed[0].returncode != 0:
+        return
+    for line in listed[0].stdout.splitlines():
+        if "'" not in line:
+            continue
+        name = line.split("'", 2)[1]
+        if not any(word in name.lower() for word in ("speaker", "pcm", "master")):
+            continue
+        _audio_call(["amixer", "-c", str(card), "sset", name, "unmute"])
+        _audio_call(["amixer", "-c", str(card), "sset", name, "80%"])
+    _audio_call(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0"])
+    _audio_call(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "0.8"])
+
+
 class Beeper:
     def __init__(self):
         self.muted, self.last, self.files = False, 0, {}
-        self.device = "plughw:0,0"
+        self.device, self._via_sg = None, False
+        _audio_runtime()
+        cards, es = _sound_cards()
+        for card in (es or cards):
+            _speaker_on(card)
+        tone = self._tone(880)
+        devices = [f"plughw:{n},0" for n in es]
+        devices.append("default")
+        devices += [f"plughw:{n},0" for n in cards if n not in es]
+        for device in devices:
+            opened = self._probe(device, tone)
+            if opened is None:
+                break
+            if opened:
+                self.device = device
+                print(f"audio: {device}" + (" via audio group" if self._via_sg else ""))
+                break
+        if self.device is None:
+            self.muted = True
+            print("audio: no playback device opened")
+
+    def _probe(self, device, path):
+        got = _audio_call(["aplay", "-D", device, path])
+        if got is None:
+            print("aplay not found (sudo apt install alsa-utils); sound disabled.")
+            return None
+        result, via_sg = got
+        if result.returncode == 0:
+            self._via_sg = via_sg
+            return True
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"audio {device}: {err.splitlines()[-1] if err else 'exit ' + str(result.returncode)}")
+        return False
 
     def _tone(self, freq):
         if freq not in self.files:
             path = os.path.join(tempfile.gettempdir(), f"gh_{freq}.wav")
             rate = 48000
             with wave.open(path, "w") as w:
-                w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+                w.setnchannels(2); w.setsampwidth(2); w.setframerate(rate)
                 n = rate // 10
-                w.writeframes(b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * freq * i / rate)
-                                                              * (1 - i / n))) for i in range(n)))
+                frames = bytearray()
+                for i in range(n):
+                    sample = int(12000 * math.sin(2 * math.pi * freq * i / rate) * (1 - i / n))
+                    frames += struct.pack("<hh", sample, sample)
+                w.writeframes(frames)
             self.files[freq] = path
         return self.files[freq]
 
     def beep(self, level):
         now = time.time()
-        if self.muted or level == 0 or now - self.last < max(0.12, 0.9 - level * 0.16):
+        if self.muted or self.device is None or level == 0 or now - self.last < max(0.12, 0.9 - level * 0.16):
             return
         self.last = now
         cmd = ["aplay", "-q", "-D", self.device, self._tone(400 + level * 200)]
+        if self._via_sg:
+            cmd = ["sg", "audio", "-c", " ".join(shlex.quote(part) for part in cmd)]
         try:
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
